@@ -366,6 +366,7 @@ if (empty($reshook)) {
 						'Propal' => '/comm/propal/class/propal.class.php',
 						'Reception' => '/reception/class/reception.class.php',
 						'SupplierProposal' => '/supplier_proposal/class/supplier_proposal.class.php',
+						'MouvementStock' => '/product/stock/class/mouvementstock.class.php',
 					);
 
 					// First, all core objects must update their tables
@@ -411,6 +412,74 @@ if (empty($reshook)) {
 					}
 					// End call triggers
 				}
+
+                  // Merge stock movements, warehouse quantities and PMP from origin into destination
+                  // Must happen before delete() which wipes origin product_stock
+                  if (!$error) {
+                      $sql = "SELECT SUM(reel) as total FROM ".MAIN_DB_PREFIX."product_stock";
+                      $sql .= " WHERE fk_product = ".((int) $productOrigin->id);
+                      $resql = $db->query($sql);
+                      $origin_stock = 0;
+                      if ($resql) {
+                          $obj_s = $db->fetch_object($resql);
+                          $origin_stock = max(0, (float) ($obj_s ? $obj_s->total : 0));
+                          $db->free($resql);
+                      }
+
+                      $sql = "SELECT SUM(reel) as total FROM ".MAIN_DB_PREFIX."product_stock";
+                      $sql .= " WHERE fk_product = ".((int) $object->id);
+                      $resql = $db->query($sql);
+                      $dest_stock = 0;
+                      if ($resql) {
+                          $obj_s = $db->fetch_object($resql);
+                          $dest_stock = max(0, (float) ($obj_s ? $obj_s->total : 0));
+                          $db->free($resql);
+                      }
+                  }
+
+                  if (!$error) {
+                      $total_stock = $dest_stock + $origin_stock;
+                      if ($total_stock > 0 && ((float) $productOrigin->pmp > 0 || (float) $object->pmp > 0)) {
+                          $new_pmp = price2num(
+                              ($dest_stock * (float) $object->pmp + $origin_stock * (float) $productOrigin->pmp) / $total_stock,
+                              'MU'
+                          );
+                          $sql = "UPDATE ".MAIN_DB_PREFIX."product SET pmp = ".((float) $new_pmp);
+                          $sql .= " WHERE rowid = ".((int) $object->id);
+                          if (!$db->query($sql)) {
+                              $error++;
+                              setEventMessages($db->lasterror(), null, 'errors');
+                          }
+                      }
+                  }
+
+                  if (!$error && $origin_stock > 0) {
+                      $sql = "INSERT INTO ".MAIN_DB_PREFIX."product_stock (fk_product, fk_entrepot, reel)";
+                      $sql .= " SELECT ".((int) $object->id).", ps.fk_entrepot, ps.reel";
+                      $sql .= " FROM ".MAIN_DB_PREFIX."product_stock ps";
+                      $sql .= " WHERE ps.fk_product = ".((int) $productOrigin->id);
+                      $sql .= " ON DUPLICATE KEY UPDATE reel = reel + VALUES(reel)";
+                      if (!$db->query($sql)) {
+                          $error++;
+                          setEventMessages($db->lasterror(), null, 'errors');
+                      }
+
+                      if (!$error) {
+                          $sql = "UPDATE ".MAIN_DB_PREFIX."product SET stock = stock + ".((float) $origin_stock);
+                          $sql .= " WHERE rowid = ".((int) $object->id);
+                          if (!$db->query($sql)) {
+                              $error++;
+                              setEventMessages($db->lasterror(), null, 'errors');
+                          }
+                      }
+                  }
+
+                  if (!$error) {
+                      // Delete the product
+                      if ($productOrigin->delete($user) < 1) {
+                          $error++;
+                      }
+                  }
 
 				if (!$error) {
 					// Delete the product
